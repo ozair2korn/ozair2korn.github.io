@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page Number Extractor</title>
+<meta name="description" content="Paste text or a saved HTML file from a Facebook page and pull out phone numbers, follower/like counts, or every number.">
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#fff; --text:#1c1e21; --muted:#65676b; --border:#dadde1;
+    --accent:#1b74e4; --accent-text:#fff; --chip:#e7f0fd; --ok:#1f8a4c;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#18191a; --panel:#242526; --text:#e4e6eb; --muted:#b0b3b8; --border:#3a3b3c;
+      --accent:#2d88ff; --accent-text:#fff; --chip:#263951; --ok:#45bd62;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{max-width:920px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:1.6rem;margin:0 0 4px}
+  p.lead{color:var(--muted);margin:0 0 20px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+  textarea{width:100%;min-height:200px;resize:vertical;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font:13px/1.45 ui-monospace,Menlo,Consolas,monospace}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px}
+  button,.btn{appearance:none;border:1px solid var(--border);background:var(--panel);color:var(--text);padding:8px 14px;border-radius:8px;font:inherit;cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-text);font-weight:600}
+  button:disabled{opacity:.5;cursor:default}
+  label.inline{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:14px}
+  input[type=text],select{padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+  input[type=file]{display:none}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+  .tab{border-radius:999px}
+  .tab[aria-selected=true]{background:var(--accent);border-color:var(--accent);color:var(--accent-text)}
+  .summary{color:var(--muted);font-size:14px;margin-bottom:8px}
+  .table-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  td.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+  td.ctx{color:var(--muted);max-width:420px}
+  mark{background:var(--chip);color:inherit;border-radius:3px;padding:0 2px}
+  .empty{color:var(--muted);padding:12px 0}
+  .toast{color:var(--ok);font-size:14px;min-height:1em}
+  details{color:var(--muted);font-size:14px}
+  details summary{cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+  <h1>Page Number Extractor</h1>
+  <p class="lead">Copy a Facebook page (Ctrl+A, Ctrl+C) and paste it below, or upload the page saved with “Save page as… → HTML”. Everything runs in your browser; nothing is uploaded.</p>
+
+  <section class="panel">
+    <textarea id="input" placeholder="Paste page text or HTML here…"></textarea>
+    <div class="row">
+      <button class="primary" id="extract">Extract</button>
+      <label class="btn" for="file">Upload .html / .txt</label>
+      <input type="file" id="file" accept=".html,.htm,.txt,.mhtml">
+      <button id="clear">Clear</button>
+      <label class="inline">Default country code
+        <input type="text" id="cc" placeholder="e.g. 1, 44, 92" size="6" inputmode="numeric">
+      </label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" data-mode="phones" aria-selected="true">Phone numbers</button>
+      <button class="tab" role="tab" data-mode="stats" aria-selected="false">Page stats</button>
+      <button class="tab" role="tab" data-mode="all" aria-selected="false">All numbers</button>
+    </div>
+    <div class="summary" id="summary">Paste something and press Extract.</div>
+    <div class="table-wrap" id="results"></div>
+    <div class="row">
+      <button id="copy" disabled>Copy values</button>
+      <button id="csv" disabled>Download CSV</button>
+      <span class="toast" id="toast"></span>
+    </div>
+  </section>
+
+  <details>
+    <summary>How it works</summary>
+    <p><b>Phone numbers</b>: finds <code>tel:</code> links and phone-shaped text (7–15 digits, with spaces, dashes, dots, brackets or a leading +), removes duplicates, and adds your default country code to local numbers when set. Dates, times and long IDs are skipped.</p>
+    <p><b>Page stats</b>: finds counts next to words like followers, likes, following, talking about, check-ins, reactions, comments, shares and views, and expands 1.2K / 3M / 4B into full numbers.</p>
+    <p><b>All numbers</b>: every number in the text with the words around it.</p>
+  </details>
+</main>
+
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const input = $('input');
+  let mode = 'phones';
+  let rows = [];
+
+  // ---------- text preparation ----------
+  function toText(raw){
+    const looksHtml = /<\s*(html|body|div|span|a)\b/i.test(raw);
+    if(!looksHtml) return {text: raw, tels: []};
+    const doc = new DOMParser().parseFromString(raw, 'text/html');
+    const tels = [...doc.querySelectorAll('a[href^="tel:"]')].map(a => decodeURIComponent(a.getAttribute('href').slice(4)));
+    doc.querySelectorAll('script,style,noscript,template').forEach(n => n.remove());
+    // put breaks between block elements so words don't run together
+    doc.querySelectorAll('div,p,li,span,a,br,h1,h2,h3,h4,td').forEach(n => n.append(' '));
+    return {text: (doc.body ? doc.body.textContent : raw).replace(/[ \t ]+/g,' '), tels};
+  }
+
+  function context(text, start, end){
+    const a = Math.max(0, start - 40), b = Math.min(text.length, end + 40);
+    const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])).replace(/\s+/g,' ');
+    return (a>0?'…':'') + esc(text.slice(a,start)) + '<mark>' + esc(text.slice(start,end)) + '</mark>' + esc(text.slice(end,b)) + (b<text.length?'…':'');
+  }
+
+  // ---------- phone numbers ----------
+  const PHONE_RE = /(?:\+|00)?\(?\d[\d\s().\-]{5,18}\d/g;
+  function normalizePhone(s, cc){
+    const plus = /^\s*(\+|00)/.test(s);
+    let d = s.replace(/\D/g,'');
+    if(s.trim().startsWith('00')) d = d.slice(2);
+    if(d.length < 7 || d.length > 15) return null;
+    if(plus) return '+' + d;
+    if(cc){
+      if(d.startsWith(cc) && d.length > 10) return '+' + d;
+      return '+' + cc + d.replace(/^0/,'');
+    }
+    return d;
+  }
+  function looksLikeNotPhone(m){
+    const t = m.trim();
+    if(/^\d{1,4}[./-]\d{1,2}[./-]\d{1,4}$/.test(t)) return true;          // dates
+    if(/^\d+\.\d+$/.test(t)) return true;                                   // decimals
+    if(/^\d{16,}$/.test(t.replace(/\D/g,''))) return true;                  // long ids
+    if(/^(19|20)\d{2}\s*[-–]\s*(19|20)\d{2}$/.test(t)) return true;         // year ranges
+    if(!/[\s().\-+]/.test(t) && t.length > 12) return true;                 // plain long digit run (ids)
+    return false;
+  }
+  function extractPhones(text, tels, cc){
+    const seen = new Map();
+    const add = (raw, ctx, source) => {
+      const n = normalizePhone(raw, cc);
+      if(!n) return;
+      if(seen.has(n)){ seen.get(n).count++; return; }
+      seen.set(n, {value:n, raw:raw.trim(), count:1, ctx, source});
+    };
+    tels.forEach(t => add(t, 'tel: link', 'link'));
+    for(const m of text.matchAll(PHONE_RE)){
+      const raw = m[0];
+      if(looksLikeNotPhone(raw)) continue;
+      // avoid grabbing digits glued to letters/numbers (e.g. inside URLs/ids)
+      const before = text[m.index-1] || '', after = text[m.index+raw.length] || '';
+      if(/[A-Za-z0-9_\/=&]/.test(before) || /[A-Za-z0-9_\/]/.test(after)) continue;
+      add(raw, context(text, m.index, m.index+raw.length), 'text');
+    }
+    return [...seen.values()];
+  }
+
+  // ---------- counts ----------
+  const MULT = {k:1e3, K:1e3, m:1e6, M:1e6, b:1e9, B:1e9, 'тыс':1e3};
+  function expand(numStr, suffix){
+    let s = numStr.replace(/\s/g,'');
+    if(suffix){ s = s.replace(',', '.'); }        // "1,2K" in some locales
+    else { s = s.replace(/[, ']/g,''); }      // "12,345"
+    const v = parseFloat(s);
+    if(isNaN(v)) return null;
+    return Math.round(v * (suffix ? (MULT[suffix] || 1) : 1));
+  }
+  const STAT_WORDS = 'followers?|following|likes?|people like this|talking about this|were here|check-?ins?|reactions?|comments?|shares?|views?|plays?|members?|reviews?|ratings?|friends?|posts?';
+  const STAT_RE = new RegExp('(?<![\\d.,])(\\d+(?:[.,\\u202f]\\d+)*)\\s?([KkMmBb])?\\b\\s*(' + STAT_WORDS + ')\\b', 'gi');
+  function extractStats(text){
+    const out = [];
+    for(const m of text.matchAll(STAT_RE)){
+      const val = expand(m[1], m[2]);
+      if(val === null) continue;
+      let label = m[3].toLowerCase().replace(/s$/,'').replace('people like this','like').replace('-','');
+      out.push({label, shown: (m[1].trim() + (m[2]||'')), value: val, ctx: context(text, m.index, m.index+m[0].length)});
+    }
+    return out;
+  }
+
+  // ---------- all numbers ----------
+  const NUM_RE = /\d[\d,.]*(?:\s?[KkMmBb]\b)?/g;
+  function extractAll(text){
+    const out = [];
+    for(const m of text.matchAll(NUM_RE)){
+      const raw = m[0].replace(/[.,]$/,'');
+      const sm = raw.match(/^([\d,.]+)\s?([KkMmBb])?$/);
+      const val = sm ? expand(sm[1], sm[2]) : null;
+      out.push({shown: raw, value: val, ctx: context(text, m.index, m.index+raw.length)});
+    }
+    return out;
+  }
+
+  // ---------- render ----------
+  const fmt = n => n == null ? '' : n.toLocaleString();
+  function render(){
+    const {text, tels} = toText(input.value);
+    const cc = $('cc').value.replace(/\D/g,'');
+    const res = $('results');
+    if(!input.value.trim()){ rows = []; res.innerHTML=''; $('summary').textContent='Paste something and press Extract.'; toggle(); return; }
+
+    if(mode === 'phones'){
+      rows = extractPhones(text, tels, cc);
+      $('summary').textContent = rows.length + ' unique phone number' + (rows.length===1?'':'s') + ' found.';
+      res.innerHTML = rows.length ? table(['Number','As written','Seen','Where'],
+        rows.map(r => [`<td class="num">${r.value}</td>`,`<td class="num">${esc(r.raw)}</td>`,`<td>${r.count}×</td>`,`<td class="ctx">${r.ctx}</td>`])) : empty();
+    } else if(mode === 'stats'){
+      rows = extractStats(text);
+      $('summary').textContent = rows.length + ' stat' + (rows.length===1?'':'s') + ' found.';
+      res.innerHTML = rows.length ? table(['Metric','Shown','Value','Where'],
+        rows.map(r => [`<td>${r.label}</td>`,`<td class="num">${esc(r.shown)}</td>`,`<td class="num">${fmt(r.value)}</td>`,`<td class="ctx">${r.ctx}</td>`])) : empty();
+    } else {
+      rows = extractAll(text);
+      $('summary').textContent = rows.length + ' number' + (rows.length===1?'':'s') + ' found.';
+      res.innerHTML = rows.length ? table(['Shown','Value','Where'],
+        rows.map(r => [`<td class="num">${esc(r.shown)}</td>`,`<td class="num">${fmt(r.value)}</td>`,`<td class="ctx">${r.ctx}</td>`])) : empty();
+    }
+    toggle();
+  }
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const table = (heads, body) => `<table><thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${body.map(r=>`<tr>${r.join('')}</tr>`).join('')}</tbody></table>`;
+  const empty = () => '<div class="empty">Nothing found in this mode. Try another tab.</div>';
+  function toggle(){ $('copy').disabled = $('csv').disabled = !rows.length; }
+
+  function values(){
+    if(mode==='phones') return rows.map(r=>r.value);
+    if(mode==='stats') return rows.map(r=>r.label+': '+r.value);
+    return rows.map(r=>r.value ?? r.shown);
+  }
+  function csv(){
+    const q = v => '"' + String(v ?? '').replace(/"/g,'""') + '"';
+    const strip = h => h.replace(/<[^>]+>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"');
+    let head, body;
+    if(mode==='phones'){ head=['number','as_written','count','context']; body=rows.map(r=>[r.value,r.raw,r.count,strip(r.ctx)]); }
+    else if(mode==='stats'){ head=['metric','shown','value','context']; body=rows.map(r=>[r.label,r.shown,r.value,strip(r.ctx)]); }
+    else { head=['shown','value','context']; body=rows.map(r=>[r.shown,r.value,strip(r.ctx)]); }
+    return [head, ...body].map(r=>r.map(q).join(',')).join('\n');
+  }
+  function flash(msg){ $('toast').textContent = msg; setTimeout(()=>$('toast').textContent='', 2000); }
+
+  // ---------- events ----------
+  $('extract').onclick = render;
+  $('clear').onclick = () => { input.value=''; render(); };
+  $('cc').oninput = () => { if(mode==='phones' && rows.length) render(); };
+  document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.setAttribute('aria-selected', x===t));
+    mode = t.dataset.mode; render();
+  });
+  $('file').onchange = e => {
+    const f = e.target.files[0]; if(!f) return;
+    const r = new FileReader(); r.onload = () => { input.value = r.result; render(); }; r.readAsText(f);
+    e.target.value = '';
+  };
+  $('copy').onclick = async () => {
+    try{ await navigator.clipboard.writeText(values().join('\n')); flash('Copied ' + rows.length); }
+    catch{ flash('Copy failed — select and copy manually'); }
+  };
+  $('csv').onclick = () => {
+    const blob = new Blob([csv()], {type:'text/csv'});
+    const a = Object.assign(document.createElement('a'), {href: URL.createObjectURL(blob), download: 'numbers-' + mode + '.csv'});
+    a.click(); URL.revokeObjectURL(a.href); flash('CSV downloaded');
+  };
+})();
+</script>
+</body>
+</html>
